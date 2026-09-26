@@ -7,9 +7,10 @@
 #include <unistd.h>     // Para fork(), usleep() y getpid()
 #include <sys/types.h>  // Tipos de datos del sistema (pid_t)
 #include <sys/wait.h>   // Para la funcion wait() que evita el busy-waiting
+#include <signal.h>    // para que la SIGCHLD no mate el programa principal de golpe
 
 #define MAX_LINE 256
-#define MAX_ACTIVIDADES 10000 // criterio de exigencia segun rubrica
+#define MAX_ACTIVIDADES 120000 // para superar la exigencia de la rubrica de 100000 actividades
 
 typedef struct {// estructura que modela cada actividad del plan de trabajo
     char id[32];
@@ -24,16 +25,38 @@ typedef struct {// estructura que modela cada actividad del plan de trabajo
     char mensajes_recibidos[2024]; // buffer para almacenar mensajes recibidos por el pipe
 } Actividad;
 
+static Actividad actividades[MAX_ACTIVIDADES];
+int total_actividades = 0;
+// funcion que se ejecuta cuando se recibe la señal SIGINT (Ctrl+C) para simular la llegada del seremi de salud
+void llegada_seremi(int sig) {
+    (void)sig; // evitamos el warning de variable sin uso
+    printf("\n\n[!!!] LLEGO EL SEREMI DE SALUD (Ctrl+C interceptado) [!!!]\n");
+    printf("Clausurando la ramada y cancelando todas las tareas en curso...\n");
+
+    for (int i = 0; i < total_actividades; i++) {
+        if (actividades[i].estado == 1 && actividades[i].pid > 0) { 
+            printf(" - asesinando proceso hijo: %s (PID: %d)\n", actividades[i].nombre, actividades[i].pid);
+            kill(actividades[i].pid, SIGKILL); // mata al proceso hijo sin piedad
+        }
+    }
+    printf("todos los procesos clausurados\n");
+    exit(EXIT_FAILURE); // cerramos el programa padre
+}
+
 int main(int argc, char *argv[]) {
     if (argc != 3) {
         printf("Error de uso. Forma correcta: %s <archivo_plan.txt> <K>\n", argv[0]); 
         return EXIT_FAILURE;  // retorna codigo de error si ponen mas o menos argumentos
     }
 
+    // registramos la funcion llegada_seremi para que se ejecute cuando se reciba la señal SIGINT (Ctrl+C)
+    signal(SIGINT, llegada_seremi);// aca se intercepta la señal
+
     char *archivo_plan = argv[1]; //se guarda el nombre del archivo de entrada
     int limite_k = atoi(argv[2]); //se guarda el valor de K
 
     srand(time(NULL)); // inicializamos la semilla para generar tiempos aleatorios
+
 
     FILE *archivo = fopen(archivo_plan, "r"); // se abre el archivo de entrada en modo lectura el r quiere decir read
     if (archivo == NULL) {
@@ -157,6 +180,7 @@ int main(int argc, char *argv[]) {
                     return EXIT_FAILURE;
                 } else if (pid_hijo == 0) {// el proceso hijo entra en esta parte del codigo
                     // el hijo no escribe en este tubo solo va a leer por lo que el apartado de escritura se cierra
+                    signal(SIGINT, SIG_IGN);// el hijo ignora la señal SiGINT para que no se clone el radar de señales
                     close(fd[1]); 
                     
                     // se lee el mensaje que nos dejo el padre en la tuberia
