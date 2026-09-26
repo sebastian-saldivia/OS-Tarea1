@@ -172,7 +172,14 @@ int main(int argc, char *argv[]) {
                     }
                     
                     usleep(actividades[indice_lista].tiempo_ms * 1000);// el proceso hijo se duerme
-                    exit(EXIT_SUCCESS); 
+                    
+                    // simulacion de falla del 20% para cumplir con el aislamiento de errores que pedia la rubrica
+                    int probabilidad_fallo = rand() % 100;
+                    if (probabilidad_fallo < 20) {
+                        exit(EXIT_FAILURE); // la tarea fallo por lo que se devuelve codigo 1 al padre
+                    } else {
+                        exit(EXIT_SUCCESS); // la tarea funciono de buena forma por lo que se devuelve codigo 0 al padre
+                    }
                 } else {// el proceso padre entra a esta parte del codigo
                     // el padre no lee solo escribe por lo que cerramos el apartado de lectura
                     close(fd[0]); 
@@ -202,21 +209,57 @@ int main(int argc, char *argv[]) {
                 //buscamos la actividad correspondiente al pid del proceso hijo que terminó y actualizamos su estado
                 for (int i = 0; i < total_actividades; i++) {
                     if (actividades[i].pid == pid_terminado) {
-                        actividades[i].estado = 2; // Marcamos como terminada
-                        procesos_corriendo--;
-                        actividades_terminadas++;
-                        printf("[-] terminado: %s (PID: %d)\n", actividades[i].nombre, pid_terminado);
-                        char mensaje_insumo[100];//buffer para el mensaje que se enviara al buzon de mensajes de la actividad
-                        snprintf(mensaje_insumo, sizeof(mensaje_insumo), "el insumo de %s esta listo", actividades[i].nombre);// se crea el mensaje que se enviara al buzon de mensajes de la actividad
-
-                        // codigo para buscar las actividades que dependen de la que acaba de terminar y se le mete el mensaje al buzon
-                        for (int d = 0; d < total_actividades; d++) {
-                            for (int j = 0; j < actividades[d].num_dependencias; j++) {
-                                if (strcmp(actividades[d].dependencias[j], actividades[i].id) == 0) {
-                                    strcat(actividades[d].mensajes_recibidos, mensaje_insumo);
+                        if (WIFEXITED(estado_salida)) { // Verifica si el hijo termino de la manera correcta
+                            int codigo = WEXITSTATUS(estado_salida);// se guarda el codigo de salida del hijo
+                            if (codigo == EXIT_SUCCESS) { // entra si el hijo termino correctamente(codigo0)
+                                actividades[i].estado = 2; // estado 2 termina de manerA correcta
+                                printf("[-] terminado con exito: %s (PID: %d)\n", actividades[i].nombre, pid_terminado);
+                                
+                                // propagacion del mensaje para las actividades que dependen de ella solo si tuvo exito
+                                char mensaje_insumo[200];
+                                snprintf(mensaje_insumo, sizeof(mensaje_insumo), "el insumo de %s esta listo. ", actividades[i].nombre);
+                                
+                                for (int d = 0; d < total_actividades; d++) {// se recorre la lista de actividades para ver cuales
+                                                                               // dependen de la actividad que acaba de terminar
+                                    for (int j = 0; j < actividades[d].num_dependencias; j++) {
+                                        if (strcmp(actividades[d].dependencias[j], actividades[i].id) == 0) {
+                                            strcat(actividades[d].mensajes_recibidos, mensaje_insumo);
+                                        }
+                                    }
                                 }
+                            } else {
+                                actividades[i].estado = 3; // estado 3: fallida
+                                printf("[x] error: la tarea %s (PID: %d) fallo durante su ejecucion.\n", actividades[i].nombre, pid_terminado);
                             }
                         }
+                        
+                        procesos_corriendo--;
+                        actividades_terminadas++;
+                        // se aplica un efecto domino para que se vayan canmcelanmdo en cascada las actividades que dependan de una que fallo
+                        int hubo_cancelaciones;
+                        do {
+                            hubo_cancelaciones = 0;
+                            for (int c = 0; c < total_actividades; c++) {
+                                if (actividades[c].estado == 0) { // si la tarea esta pendiente
+                                    for (int j = 0; j < actividades[c].num_dependencias; j++) {
+                                        for (int k = 0; k < total_actividades; k++) {
+                                            // revisamos si la dependencia de esta tarea corresponde a una tarea fallida o cancelada (estado 3)
+                                            if (strcmp(actividades[c].dependencias[j], actividades[k].id) == 0) {
+                                                if (actividades[k].estado == 3) { 
+                                                    actividades[c].estado = 3; // la cancelamos
+                                                    actividades_terminadas++;  // la sumamos a terminadas para que no bloquee el bucle global
+                                                    hubo_cancelaciones = 1;
+                                                    printf("[-] cancelada por cascada (dependencias): %s (falta insumo)\n", actividades[c].nombre);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        if (actividades[c].estado == 3) break;
+                                    }
+                                }
+                            }
+                        } while (hubo_cancelaciones); // repite por si la cancelacion afecta a otra tarea mas abajo en la cadena
+                        break;
                     }
                 }
             }
