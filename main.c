@@ -11,7 +11,7 @@
 #define MAX_LINE 256
 #define MAX_ACTIVIDADES 10000 // criterio de exigencia segun rubrica
 
-typedef struct {
+typedef struct {// estructura que modela cada actividad del plan de trabajo
     char id[32];
     char nombre[100];
     int tiempo_ms;
@@ -112,15 +112,23 @@ int main(int argc, char *argv[]) {
                     
                     //se revisa si todas las depencias ya terminaron es decir que esten en estado 2
                     for (int j = 0; j < actividades[i].num_dependencias; j++) {
+                        int dependencia_cumplida = 0; // asumimos que la dependencia no se ha cumplido todavia
+                        
                         for (int k = 0; k < total_actividades; k++) {
+                            // limpiamos saltos de linea invisibles por si acaso
+                            actividades[i].dependencias[j][strcspn(actividades[i].dependencias[j], "\r\n")] = 0;
+                            
                             if (strcmp(actividades[i].dependencias[j], actividades[k].id) == 0) {
-                                if (actividades[k].estado != 2) { 
-                                    dependencias_ok = 0; // error por una dependencia que aun no termina
+                                if (actividades[k].estado == 2) { 
+                                    dependencia_cumplida = 1; // encontramos la dependencia y ya esta terminada
                                 }
                                 break;
                             }
                         }
-                        if (dependencias_ok == 0) break;// si se encuentra una dependencia que no ha terminado, se rompe el bucle
+                        if (dependencia_cumplida == 0) {
+                            dependencias_ok = 0; // error por una dependencia que no existe o aun no termina
+                            break;// si se encuentra una dependencia que no ha terminado, se rompe el bucle
+                        }
                     }
 
                     if (dependencias_ok == 1) {
@@ -174,7 +182,7 @@ int main(int argc, char *argv[]) {
                 }
             }
         } else if (se_lanzo_proceso == 0 && actividades_terminadas < total_actividades) {// si no se lanzo ningun proceso y aun hay actividades pendientes, significa que hay un deadlock
-            printf("Error: Deadlock detectado.\n");
+            printf("las tareas se bloquearon porque falta una dependencia a esta\n");
             break;
         }
     }
@@ -182,6 +190,3 @@ int main(int argc, char *argv[]) {
     printf("\n--- SIMULACION EXITOSA: LA RAMADA ESTA LISTA ---\n");
     return EXIT_SUCCESS;
 }
-
-//Hay un error en el codigo que se debe revisar respecto servir la mesa que se ejecuto en el primer
-//grupo junto con prender el carbon pero este de servir mesa depende de armas choripan se debe revisar
