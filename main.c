@@ -20,6 +20,8 @@ typedef struct {// estructura que modela cada actividad del plan de trabajo
     // variables para el manejo de procesos y la concurrencia
     pid_t pid;       // Guarda el ID del proceso hijo
     int estado;      // 0: pendiente, 1: corriendo, 2: terminada
+    //variable para manejar los pipes
+    char mensajes_recibidos[2024]; // buffer para almacenar mensajes recibidos por el pipe
 } Actividad;
 
 int main(int argc, char *argv[]) {
@@ -39,7 +41,7 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    Actividad actividades[MAX_ACTIVIDADES];
+    static Actividad actividades[MAX_ACTIVIDADES];
     int total_actividades = 0;// contador de actividades cargadas
     char linea[MAX_LINE];// buffer para leer cada linea del archivo
 
@@ -72,6 +74,7 @@ int main(int argc, char *argv[]) {
         // se inicializan las variables de control de procesos y concurrencia
         actividades[total_actividades].estado = 0; // las tareas nacen "pendiente" porque aun no se han lanzado
         actividades[total_actividades].pid = 0;    // Aún no tiene proceso asociado es decir no hay un hijo que la ejecute
+        strcpy(actividades[total_actividades].mensajes_recibidos, ""); // se inicia el buffer que funciona como un buzon de mensajes para cada actividad
         
         if (deps_str != NULL) {
             char *dep_resto = deps_str;// se guarda el resto de la linea en dep_resto para poder usar strsep
@@ -139,22 +142,48 @@ int main(int argc, char *argv[]) {
             }
 
             if (indice_lista != -1) {
+                // se crea una tuberia (pipe) antes del fork
+                int fd[2]; // 2 espacios uno para fd[0] que es para lectura y el otro fd[1] que es para escritura
+                if (pipe(fd) == -1) {
+                    printf("no se puede crear el pipe\n");
+                    return EXIT_FAILURE;
+                }
+
                 // creacion de un proceso hijo para ejecutar la actividad seleccionada
                 pid_t pid_hijo = fork();
 
-                if (pid_hijo < 0) {// error al crear el proceso hijo ya que fork() devuelve un valor negativo si falla
-                    printf("Error crítico: falló la clonación (fork).\n");
+                if (pid_hijo < 0) {// error al crear el proceso hijo porque el fork al dar un numero negativo significa que hubo un error
+                    printf("no se pudo crear el proceso hijo\n");
                     return EXIT_FAILURE;
-                } else if (pid_hijo == 0) {// el proceso hijo entra en este bloque de código
-                    printf("[+] Iniciando: %s (PID: %d, Duracion: %d ms)\n", actividades[indice_lista].nombre, getpid(), actividades[indice_lista].tiempo_ms);
+                } else if (pid_hijo == 0) {// el proceso hijo entra en esta parte del codigo
+                    // el hijo no escribe en este tubo solo va a leer por lo que el apartado de escritura se cierra
+                    close(fd[1]); 
                     
-                    usleep(actividades[indice_lista].tiempo_ms * 1000);// el proceso hijo se duerme por el tiempo de la actividad en milisegundos (usleep() recibe microsegundos)
-                    // el proceso hijo termina su ejecución y devuelve un codigo de salida exitoso
+                    // se lee el mensaje que nos dejo el padre en la tuberia
+                    char buffer_tuberia[1024] = "";//limpiamos el buffer para evitar errores de basura en memoria
+                    read(fd[0], buffer_tuberia, sizeof(buffer_tuberia)); // leemos el mensaje que nos dejo el padre en la tuberia
+                    close(fd[0]); // cerramos la lectura al terminar de usarla
+                    
+                    printf("[+] se esta iniciando: %s (PID: %d, duracion o tiempo: %d ms)\n", actividades[indice_lista].nombre, getpid(), actividades[indice_lista].tiempo_ms);
+                    
+                    // si se recibieron mensajes de las dependencias se imprime para comprobar quie este funcionando el "buzon" de mensajes
+                    if (strlen(buffer_tuberia) > 0) {
+                        printf("mensaje recibido por el pipe: %s\n", buffer_tuberia);
+                    }
+                    
+                    usleep(actividades[indice_lista].tiempo_ms * 1000);// el proceso hijo se duerme
                     exit(EXIT_SUCCESS); 
-                } else {// el proceso padre entra en este bloque de código
-                    actividades[indice_lista].pid = pid_hijo; // se guarda el pid del proceso hijo en la estructura de actividades
-                    actividades[indice_lista].estado = 1;     // se marca la actividad como corriendo
-                    procesos_corriendo++;                     // aumenta el contador de procesos corriendo
+                } else {// el proceso padre entra a esta parte del codigo
+                    // el padre no lee solo escribe por lo que cerramos el apartado de lectura
+                    close(fd[0]); 
+                    
+                    // metemos en la tuberia los mensajes que tenia guardados la actividad
+                    write(fd[1], actividades[indice_lista].mensajes_recibidos, strlen(actividades[indice_lista].mensajes_recibidos) + 1);
+                    close(fd[1]); // se cierra la escritura
+
+                    actividades[indice_lista].pid = pid_hijo; // guardamos el pid del proceso hijo en la estructura de actividades
+                    actividades[indice_lista].estado = 1;     // se cambia el estado a corriendo es decir un 1
+                    procesos_corriendo++;                     
                     se_lanzo_proceso = 1;
                 }
             } else {
@@ -164,10 +193,10 @@ int main(int argc, char *argv[]) {
         }
 
         // esperar sin Busy-Waiting para cumplir con la rubrica
-        // si aun hay procesos corriendo el padre se va a dormir hasta que uno de los hijos termine su ejecución y le envie la señal SIGCHLD
-        if (procesos_corriendo > 0) {// si hay procesos corriendo, el padre espera a que uno de ellos termine
+        // si aun hay procesos corriendo el padre se va a dormir hasta que uno de los hijos termine su ejecucion y le envie la señal SIGCHLD
+        if (procesos_corriendo > 0) {// si hay procesos corriendo el padre espera a que uno de ellos termine
             int estado_salida;
-            pid_t pid_terminado = wait(&estado_salida); // El Padre se pausa aqui hasta recibir la señal de un hijo.
+            pid_t pid_terminado = wait(&estado_salida); // El Padre se pausa aqui hasta recibir la señal de un hijo
 
             if (pid_terminado > 0) {
                 //buscamos la actividad correspondiente al pid del proceso hijo que terminó y actualizamos su estado
@@ -176,12 +205,22 @@ int main(int argc, char *argv[]) {
                         actividades[i].estado = 2; // Marcamos como terminada
                         procesos_corriendo--;
                         actividades_terminadas++;
-                        printf("[-] Terminado: %s (PID: %d)\n", actividades[i].nombre, pid_terminado);
-                        break;
+                        printf("[-] terminado: %s (PID: %d)\n", actividades[i].nombre, pid_terminado);
+                        char mensaje_insumo[100];//buffer para el mensaje que se enviara al buzon de mensajes de la actividad
+                        snprintf(mensaje_insumo, sizeof(mensaje_insumo), "el insumo de %s esta listo", actividades[i].nombre);// se crea el mensaje que se enviara al buzon de mensajes de la actividad
+
+                        // codigo para buscar las actividades que dependen de la que acaba de terminar y se le mete el mensaje al buzon
+                        for (int d = 0; d < total_actividades; d++) {
+                            for (int j = 0; j < actividades[d].num_dependencias; j++) {
+                                if (strcmp(actividades[d].dependencias[j], actividades[i].id) == 0) {
+                                    strcat(actividades[d].mensajes_recibidos, mensaje_insumo);
+                                }
+                            }
+                        }
                     }
                 }
             }
-        } else if (se_lanzo_proceso == 0 && actividades_terminadas < total_actividades) {// si no se lanzo ningun proceso y aun hay actividades pendientes, significa que hay un deadlock
+        } else if (se_lanzo_proceso == 0 && actividades_terminadas < total_actividades) {// si no se lanzo ningun proceso y aun hay actividades pendientes significa que hay un deadlock
             printf("las tareas se bloquearon porque falta una dependencia a esta\n");
             break;
         }
